@@ -20,7 +20,7 @@ if(WIN32)
     # 使用 LoadLibrary 动态加载 DLL，不需要链接 .lib
     # 如果需要链接导入库，取消下面这行的注释
     target_link_directories(mupdf_test PRIVATE ${MUPDF_LIB_DIR})
-    target_link_libraries(mupdf_test mupdf_dll)
+    target_link_libraries(mupdf_test mupdf)
 endif()
 
 # copy exe to source directory for easy execution

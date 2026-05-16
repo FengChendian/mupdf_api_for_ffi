@@ -27,6 +27,11 @@ typedef enum {
     MUPDF_ERROR_OOM,
 } MuPdfError;
 
+/* 矩形 */
+typedef struct {
+    float x0, y0, x1, y1;
+} MuPdfRect;
+
 /* 渲染结果 - 类似 PDFium 的数据布局 */
 typedef struct {
     int width;
@@ -53,6 +58,30 @@ typedef struct {
     char* json;    /* UTF-8 JSON 字符串，调用方负责释放 */
     int length;    /* 字符串字节长度 (不含末尾 \0) */
 } MuPdfOutlineJson;
+
+/* 结构化文本提取 */
+typedef struct {
+    MuPdfRect bbox;
+    char utf8[5];        /* UTF-8 编码的单个字符 + 结束符 */
+} MuPdfTextChar;
+
+typedef struct {
+    MuPdfRect bbox;
+    int chars_count;
+    MuPdfTextChar* chars;  /* 字符数组 */
+    char* text;            /* 整行文字，调用方负责释放 */
+} MuPdfTextLine;
+
+typedef struct {
+    MuPdfRect bbox;
+    int lines_count;
+    MuPdfTextLine* lines;  /* 行数组 */
+} MuPdfTextBlock;
+
+typedef struct {
+    int blocks_count;
+    MuPdfTextBlock* blocks;  /* 块数组 */
+} MuPdfTextPage;
 
 /* === 生命周期管理 === */
 
@@ -90,6 +119,15 @@ MUPDF_API void mupdf_ctx_destroy(MuPdfContext* ctx);
 
 /* 释放渲染结果 */
 MUPDF_API void mupdf_image_free(MuPdfImage* image);
+
+/* 提取页面结构化文本
+   page_number: 从 0 开始
+   返回 NULL 表示失败 */
+MUPDF_API MuPdfTextPage* mupdf_page_get_stext(MuPdfContext* ctx, MuPdfDocument* doc,
+                                               int page_number);
+
+/* 释放结构化文本提取结果 */
+MUPDF_API void mupdf_stext_page_free(MuPdfTextPage* page);
 
 /* 获取最后错误信息（返回静态字符串，不要释放） */
 MUPDF_API const char* mupdf_last_error(MuPdfContext* ctx);

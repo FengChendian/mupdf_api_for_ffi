@@ -3,7 +3,7 @@
 #include "mupdf_api.h"
 
 int main(int argc, char* argv[]) {
-    const char* pdf_path = "nwag224.pdf";
+    const char* pdf_path = "0.pdf";
 
     if (argc > 1) {
         pdf_path = argv[1];
@@ -74,8 +74,78 @@ int main(int argc, char* argv[]) {
         printf("    Skipping render test (no pages)\n");
     }
 
+    /* 6. 测试结构化文本提取 */
+    printf("\n[6] Testing mupdf_page_get_stext (page 0)...\n");
+    if (page_count > 0) {
+        MuPdfTextPage* stext = mupdf_page_get_stext(ctx, doc, 0);
+        if (!stext) {
+            fprintf(stderr, "    Failed to extract structured text: %s\n", mupdf_last_error(ctx));
+        } else {
+            printf("    Blocks count: %d\n", stext->blocks_count);
+
+            for (int bi = 0; bi < stext->blocks_count; bi++) {
+                MuPdfTextBlock* tb = &stext->blocks[bi];
+                printf("\n    --- Block %d ---\n", bi);
+                printf("    Block bbox: [%.2f, %.2f, %.2f, %.2f]\n",
+                       tb->bbox.x0, tb->bbox.y0, tb->bbox.x1, tb->bbox.y1);
+                printf("    Lines count: %d\n", tb->lines_count);
+
+                for (int li = 0; li < tb->lines_count; li++) {
+                    MuPdfTextLine* tl = &tb->lines[li];
+                    printf("\n      Line %d:\n", li);
+                    printf("        bbox: [%.2f, %.2f, %.2f, %.2f]\n",
+                           tl->bbox.x0, tl->bbox.y0, tl->bbox.x1, tl->bbox.y1);
+                    printf("        chars_count: %d\n", tl->chars_count);
+                    printf("        text: \"%s\"\n", tl->text);
+
+                    /* 打印每个字符的详细信息 */
+                    for (int ci = 0; ci < tl->chars_count; ci++) {
+                        MuPdfTextChar* tc = &tl->chars[ci];
+                        printf("          char[%d]: '%s'  bbox=[%.2f, %.2f, %.2f, %.2f]  size=(%.2f x %.2f)\n",
+                               ci, tc->utf8,
+                               tc->bbox.x0, tc->bbox.y0, tc->bbox.x1, tc->bbox.y1,
+                               tc->bbox.x1 - tc->bbox.x0, tc->bbox.y1 - tc->bbox.y0);
+                    }
+                }
+            }
+
+            /* 打印用户要求的关键信息：第一行第一个字符，第二行第二个字符 */
+            // printf("\n    === 关键信息 ===\n");
+            // if (stext->blocks_count > 0 && stext->blocks[0].lines_count > 0) {
+            //     MuPdfTextLine* line0 = &stext->blocks[0].lines[0];
+            //     if (line0->chars_count > 0) {
+            //         MuPdfTextChar* ch0 = &line0->chars[0];
+            //         printf("    第一行第一个字符: '%s'  bbox=[%.2f, %.2f, %.2f, %.2f]\n",
+            //                ch0->utf8, ch0->bbox.x0, ch0->bbox.y0, ch0->bbox.x1, ch0->bbox.y1);
+            //     } else {
+            //         printf("    第一行没有字符\n");
+            //     }
+            // } else {
+            //     printf("    没有第一行\n");
+            // }
+
+            // if (stext->blocks_count > 0 && stext->blocks[0].lines_count > 1) {
+            //     MuPdfTextLine* line1 = &stext->blocks[0].lines[1];
+            //     if (line1->chars_count > 1) {
+            //         MuPdfTextChar* ch1 = &line1->chars[1];
+            //         printf("    第二行第二个字符: '%s'  bbox=[%.2f, %.2f, %.2f, %.2f]\n",
+            //                ch1->utf8, ch1->bbox.x0, ch1->bbox.y0, ch1->bbox.x1, ch1->bbox.y1);
+            //     } else {
+            //         printf("    第二行字符数不足 %d 个\n", line1->chars_count > 0 ? 2 : 1);
+            //     }
+            // } else {
+            //     printf("    没有第二行\n");
+            // }
+
+            mupdf_stext_page_free(stext);
+            printf("\n    Structured text freed.\n");
+        }
+    } else {
+        printf("    Skipping stext test (no pages)\n");
+    }
+
     /* 清理资源 */
-    printf("\n[6] Cleaning up...\n");
+    printf("\n[7] Cleaning up...\n");
     mupdf_doc_close(ctx, doc);
     printf("    Document closed.\n");
     mupdf_ctx_destroy(ctx);

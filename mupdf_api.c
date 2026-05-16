@@ -294,6 +294,219 @@ MUPDF_API void mupdf_image_free(MuPdfImage* image) {
     free(image);
 }
 
+/* === UTF-8 辅助函数 === */
+
+/* 将 Unicode 码点编码为 UTF-8，返回写入字节数（不含结束符） */
+static int unicode_to_utf8(int c, char out[5]) {
+    if (c < 0x80) {
+        out[0] = (char)c;
+        out[1] = '\0';
+        return 1;
+    } else if (c < 0x800) {
+        out[0] = (char)(0xC0 | (c >> 6));
+        out[1] = (char)(0x80 | (c & 0x3F));
+        out[2] = '\0';
+        return 2;
+    } else if (c < 0x10000) {
+        out[0] = (char)(0xE0 | (c >> 12));
+        out[1] = (char)(0x80 | ((c >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (c & 0x3F));
+        out[3] = '\0';
+        return 3;
+    } else {
+        out[0] = (char)(0xF0 | (c >> 18));
+        out[1] = (char)(0x80 | ((c >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((c >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (c & 0x3F));
+        out[4] = '\0';
+        return 4;
+    }
+}
+
+/* === 结构化文本提取 === */
+
+MUPDF_API MuPdfTextPage* mupdf_page_get_stext(MuPdfContext* ctx, MuPdfDocument* doc,
+                                               int page_number) {
+    if (!ctx || !doc) return NULL;
+
+    fz_page* page = NULL;
+    fz_stext_page* stext_page = NULL;
+    fz_device* dev = NULL;
+    MuPdfTextPage* result = NULL;
+
+    /* MuPDF API 调用放在 fz_try 中（可能 longjmp） */
+    fz_try(ctx->ctx) {
+        page = fz_load_page(ctx->ctx, doc->doc, page_number);
+        stext_page = fz_new_stext_page(ctx->ctx, fz_empty_rect);
+
+        fz_stext_options opts = { 0 };
+        opts.flags = FZ_STEXT_PRESERVE_WHITESPACE;
+
+        dev = fz_new_stext_device(ctx->ctx, stext_page, &opts);
+        fz_run_page(ctx->ctx, page, dev, fz_identity, NULL);
+        fz_close_device(ctx->ctx, dev);
+        fz_drop_device(ctx->ctx, dev);
+        dev = NULL;
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        if (dev) fz_drop_device(ctx->ctx, dev);
+        if (stext_page) fz_drop_stext_page(ctx->ctx, stext_page);
+        if (page) fz_drop_page(ctx->ctx, page);
+        return NULL;
+    }
+
+    /* 数据转换在 fz_try 外部进行，避免 longjmp 导致 malloc 泄漏 */
+    {
+        int block_count = 0;
+        int* line_counts = NULL;
+
+        /* 第一遍：统计文本块数 */
+        for (fz_stext_block* blk = stext_page->first_block; blk; blk = blk->next) {
+            if (blk->type == FZ_STEXT_BLOCK_TEXT)
+                block_count++;
+        }
+
+        if (block_count == 0) {
+            result = (MuPdfTextPage*)calloc(1, sizeof(MuPdfTextPage));
+            goto done;
+        }
+
+        /* 统计每个块的行数 */
+        line_counts = (int*)calloc((size_t)block_count, sizeof(int));
+        if (!line_counts) {
+            snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+            goto done;
+        }
+
+        {
+            int bi = 0;
+            for (fz_stext_block* blk = stext_page->first_block; blk; blk = blk->next) {
+                if (blk->type != FZ_STEXT_BLOCK_TEXT) continue;
+                for (fz_stext_line* ln = blk->u.t.first_line; ln; ln = ln->next)
+                    line_counts[bi]++;
+                bi++;
+            }
+        }
+
+        /* 分配顶层结构 */
+        result = (MuPdfTextPage*)calloc(1, sizeof(MuPdfTextPage));
+        if (!result) {
+            free(line_counts);
+            snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+            goto done;
+        }
+
+        result->blocks_count = block_count;
+        result->blocks = (MuPdfTextBlock*)calloc((size_t)block_count, sizeof(MuPdfTextBlock));
+        if (!result->blocks) {
+            free(line_counts);
+            mupdf_stext_page_free(result);
+            result = NULL;
+            snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+            goto done;
+        }
+
+        /* 第二遍：填充数据 */
+        {
+            int bi = 0;
+            for (fz_stext_block* blk = stext_page->first_block; blk; blk = blk->next) {
+                if (blk->type != FZ_STEXT_BLOCK_TEXT) continue;
+
+                MuPdfTextBlock* tb = &result->blocks[bi];
+                tb->bbox.x0 = blk->bbox.x0;
+                tb->bbox.y0 = blk->bbox.y0;
+                tb->bbox.x1 = blk->bbox.x1;
+                tb->bbox.y1 = blk->bbox.y1;
+                tb->lines_count = line_counts[bi];
+                tb->lines = (MuPdfTextLine*)calloc((size_t)line_counts[bi], sizeof(MuPdfTextLine));
+                if (!tb->lines) {
+                    free(line_counts);
+                    mupdf_stext_page_free(result);
+                    result = NULL;
+                    snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+                    goto done;
+                }
+
+                int li = 0;
+                for (fz_stext_line* ln = blk->u.t.first_line; ln; ln = ln->next) {
+                    MuPdfTextLine* tl = &tb->lines[li];
+
+                    tl->bbox.x0 = ln->bbox.x0;
+                    tl->bbox.y0 = ln->bbox.y0;
+                    tl->bbox.x1 = ln->bbox.x1;
+                    tl->bbox.y1 = ln->bbox.y1;
+
+                    /* 统计字符数 */
+                    int ch_count = 0;
+                    for (fz_stext_char* ch = ln->first_char; ch; ch = ch->next)
+                        ch_count++;
+
+                    tl->chars_count = ch_count;
+                    tl->chars = (MuPdfTextChar*)calloc((size_t)ch_count, sizeof(MuPdfTextChar));
+                    tl->text = (char*)calloc((size_t)(ch_count * 4 + 1), 1);
+
+                    if (!tl->chars || !tl->text) {
+                        free(line_counts);
+                        mupdf_stext_page_free(result);
+                        result = NULL;
+                        snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+                        goto done;
+                    }
+
+                    /* 填充字符数据 */
+                    int ci = 0;
+                    size_t text_pos = 0;
+                    for (fz_stext_char* ch = ln->first_char; ch; ch = ch->next) {
+                        MuPdfTextChar* tc = &tl->chars[ci];
+
+                        fz_rect r = fz_rect_from_quad(ch->quad);
+                        tc->bbox.x0 = r.x0;
+                        tc->bbox.y0 = r.y0;
+                        tc->bbox.x1 = r.x1;
+                        tc->bbox.y1 = r.y1;
+
+                        int bytes = unicode_to_utf8(ch->c, tc->utf8);
+                        if (bytes > 0) {
+                            memcpy(tl->text + text_pos, tc->utf8, (size_t)bytes);
+                            text_pos += (size_t)bytes;
+                        }
+                        ci++;
+                    }
+                    tl->text[text_pos] = '\0';
+                    li++;
+                }
+                bi++;
+            }
+        }
+        free(line_counts);
+    }
+
+done:
+    if (page) fz_drop_page(ctx->ctx, page);
+    if (stext_page) fz_drop_stext_page(ctx->ctx, stext_page);
+
+    return result;
+}
+
+MUPDF_API void mupdf_stext_page_free(MuPdfTextPage* page) {
+    if (!page) return;
+    if (page->blocks) {
+        for (int bi = 0; bi < page->blocks_count; bi++) {
+            MuPdfTextBlock* tb = &page->blocks[bi];
+            if (tb->lines) {
+                for (int li = 0; li < tb->lines_count; li++) {
+                    MuPdfTextLine* tl = &tb->lines[li];
+                    if (tl->chars) free(tl->chars);
+                    if (tl->text) free(tl->text);
+                }
+                free(tb->lines);
+            }
+        }
+        free(page->blocks);
+    }
+    free(page);
+}
+
 MUPDF_API const char* mupdf_last_error(MuPdfContext* ctx) {
     if (!ctx) return "NULL context";
     return ctx->last_error;

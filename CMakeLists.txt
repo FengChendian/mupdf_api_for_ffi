@@ -70,13 +70,13 @@ add_custom_command(TARGET mupdf_test POST_BUILD
 
 # 构建 mupdf 后自动复制 DLL 和 LIB 到 test/dll 目录
 add_custom_command(TARGET mupdf POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/test/dll
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/test/import_lib
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     $<TARGET_FILE:mupdf>
     ${CMAKE_SOURCE_DIR}/test/
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
     $<TARGET_LINKER_FILE:mupdf>
-    ${CMAKE_SOURCE_DIR}/test/dll/
+    ${CMAKE_SOURCE_DIR}/test/import_lib/
     COMMENT "Copying mupdf.dll and .lib to test/dll directory"
 )
 # 构建后将 mupdf_api.h 复制到 test/include 目录
