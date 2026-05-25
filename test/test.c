@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include "mupdf_api.h"
 
 int main(int argc, char* argv[]) {
@@ -109,34 +110,6 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            /* 打印用户要求的关键信息：第一行第一个字符，第二行第二个字符 */
-            // printf("\n    === 关键信息 ===\n");
-            // if (stext->blocks_count > 0 && stext->blocks[0].lines_count > 0) {
-            //     MuPdfTextLine* line0 = &stext->blocks[0].lines[0];
-            //     if (line0->chars_count > 0) {
-            //         MuPdfTextChar* ch0 = &line0->chars[0];
-            //         printf("    第一行第一个字符: '%s'  bbox=[%.2f, %.2f, %.2f, %.2f]\n",
-            //                ch0->utf8, ch0->bbox.x0, ch0->bbox.y0, ch0->bbox.x1, ch0->bbox.y1);
-            //     } else {
-            //         printf("    第一行没有字符\n");
-            //     }
-            // } else {
-            //     printf("    没有第一行\n");
-            // }
-
-            // if (stext->blocks_count > 0 && stext->blocks[0].lines_count > 1) {
-            //     MuPdfTextLine* line1 = &stext->blocks[0].lines[1];
-            //     if (line1->chars_count > 1) {
-            //         MuPdfTextChar* ch1 = &line1->chars[1];
-            //         printf("    第二行第二个字符: '%s'  bbox=[%.2f, %.2f, %.2f, %.2f]\n",
-            //                ch1->utf8, ch1->bbox.x0, ch1->bbox.y0, ch1->bbox.x1, ch1->bbox.y1);
-            //     } else {
-            //         printf("    第二行字符数不足 %d 个\n", line1->chars_count > 0 ? 2 : 1);
-            //     }
-            // } else {
-            //     printf("    没有第二行\n");
-            // }
-
             mupdf_stext_page_free(stext);
             printf("\n    Structured text freed.\n");
         }
@@ -144,8 +117,47 @@ int main(int argc, char* argv[]) {
         printf("    Skipping stext test (no pages)\n");
     }
 
+    /* 7. 测试 mupdf_pages_render_no_annot 批量渲染所有页面 */
+    printf("\n[7] Testing mupdf_pages_render_no_annot (all pages, zoom=100%%, rotate=0, alpha=0)...\n");
+    if (page_count > 0) {
+        clock_t t0 = clock();
+        MuPdfImages* images = mupdf_pages_render_no_annot(ctx, doc, 0, page_count - 1, 100.0f, 0.0f, 1);
+        clock_t t1 = clock();
+        if (!images) {
+            fprintf(stderr, "    Failed to batch render: %s\n", mupdf_last_error(ctx));
+        } else {
+            double elapsed = (double)(t1 - t0) / CLOCKS_PER_SEC * 1000.0;
+            printf("    Rendered %d pages in %.2f ms (%.2f ms/page)\n",
+                   images->images_count, elapsed, elapsed / images->images_count);
+            mupdf_images_free(images);
+            printf("    Batch render results freed.\n");
+        }
+    } else {
+        printf("    Skipping batch render test (no pages)\n");
+    }
+
+    /* 8. 测试 mupdf_page_render_no_annot 逐页渲染所有页面 */
+    printf("\n[8] Testing mupdf_page_render_no_annot (each page, zoom=100%%, rotate=0, alpha=0)...\n");
+    if (page_count > 0) {
+        clock_t t0 = clock();
+        for (int i = 0; i < page_count; i++) {
+            MuPdfImage* img = mupdf_page_render_no_annot(ctx, doc, i, 100.0f, 0.0f, 1);
+            if (!img) {
+                fprintf(stderr, "    Failed to render page %d: %s\n", i, mupdf_last_error(ctx));
+            } else {
+                mupdf_image_free(img);
+            }
+        }
+        clock_t t1 = clock();
+        double elapsed = (double)(t1 - t0) / CLOCKS_PER_SEC * 1000.0;
+        printf("    Rendered %d pages in %.2f ms (%.2f ms/page)\n",
+               page_count, elapsed, elapsed / page_count);
+    } else {
+        printf("    Skipping single-page render test (no pages)\n");
+    }
+
     /* 清理资源 */
-    printf("\n[7] Cleaning up...\n");
+    printf("\n[9] Cleaning up...\n");
     mupdf_doc_close(ctx, doc);
     printf("    Document closed.\n");
     mupdf_ctx_destroy(ctx);

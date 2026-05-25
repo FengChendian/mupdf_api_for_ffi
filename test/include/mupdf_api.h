@@ -37,9 +37,15 @@ typedef struct {
     int width;
     int height;
     int stride;      /* 每行字节数 */
-    int components;  /* 每像素分量数 (RGB=3, RGBA=4) */
+    int components;  /* 每像素分量数 (始终为 RGBA=4) */
     unsigned char* buffer;  /* 原始字节数据，调用方负责释放 */
 } MuPdfImage;
+
+/* 多页渲染结果 */
+typedef struct {
+    int images_count;
+    MuPdfImage** images;  /* 图片数组，调用方负责释放 */
+} MuPdfImages;
 
 /* 目录项（树形结构） */
 typedef struct MuPdfOutlineItem {
@@ -83,6 +89,28 @@ typedef struct {
     MuPdfTextBlock* blocks;  /* 块数组 */
 } MuPdfTextPage;
 
+/* 页面注释 */
+typedef struct {
+    MuPdfRect rect;
+    int type;             /* pdf_annot_type 枚举值 (PDF_ANNOT_HIGHLIGHT, PDF_ANNOT_TEXT 等) */
+} MuPdfAnnotation;
+
+typedef struct {
+    int annots_count;
+    MuPdfAnnotation* annots;  /* 注释数组 */
+} MuPdfAnnotationPage;
+
+/* 页面链接 */
+typedef struct {
+    MuPdfRect rect;
+    char* uri;                 /* 链接 URI，调用方负责释放 */
+} MuPdfLink;
+
+typedef struct {
+    int links_count;
+    MuPdfLink* links;          /* 链接数组 */
+} MuPdfLinkPage;
+
 /* === 生命周期管理 === */
 
 /* 创建上下文（内部处理 fz_register_document_handlers） */
@@ -106,10 +134,16 @@ MUPDF_API void mupdf_outline_free(MuPdfOutlineJson* outline);
    page_number: 从 0 开始
    zoom: 缩放百分比 (100 = 72dpi)
    rotate: 旋转角度 (0, 90, 180, 270)
-   alpha: 是否包含 alpha 通道 (0 或 1)
+   alpha: 0=不透明(RGB输入,自动转为RGBA), 1=含透明通道(RGBA)
+   返回的 MuPdfImage 始终为 RGBA 格式 (components=4, stride=width*4)
    返回 NULL 表示失败 */
 MUPDF_API MuPdfImage* mupdf_page_render(MuPdfContext* ctx, MuPdfDocument* doc,
                                          int page_number, float zoom, float rotate, int alpha);
+
+/* 渲染页面内容（不含注释/annotations）
+   参数和返回格式同 mupdf_page_render，但不渲染批注、高亮等注释内容 */
+MUPDF_API MuPdfImage* mupdf_page_render_no_annot(MuPdfContext* ctx, MuPdfDocument* doc,
+                                                  int page_number, float zoom, float rotate, int alpha);
 
 /* 关闭文档（释放文档和内部 context 资源） */
 MUPDF_API void mupdf_doc_close(MuPdfContext* ctx, MuPdfDocument* doc);
@@ -117,8 +151,19 @@ MUPDF_API void mupdf_doc_close(MuPdfContext* ctx, MuPdfDocument* doc);
 /* 销毁上下文 */
 MUPDF_API void mupdf_ctx_destroy(MuPdfContext* ctx);
 
+/* 渲染页面范围（不含注释），返回所有页面的图片数组
+   start_page: 起始页（从 0 开始）
+   end_page: 结束页（含，从 0 开始）
+   其他参数同 mupdf_page_render_no_annot */
+MUPDF_API MuPdfImages* mupdf_pages_render_no_annot(MuPdfContext* ctx, MuPdfDocument* doc,
+                                                     int start_page, int end_page,
+                                                     float zoom, float rotate, int alpha);
+
 /* 释放渲染结果 */
 MUPDF_API void mupdf_image_free(MuPdfImage* image);
+
+/* 释放多页渲染结果 */
+MUPDF_API void mupdf_images_free(MuPdfImages* images);
 
 /* 提取页面结构化文本
    page_number: 从 0 开始
@@ -128,6 +173,41 @@ MUPDF_API MuPdfTextPage* mupdf_page_get_stext(MuPdfContext* ctx, MuPdfDocument* 
 
 /* 释放结构化文本提取结果 */
 MUPDF_API void mupdf_stext_page_free(MuPdfTextPage* page);
+
+/* 获取页面注释列表
+   page_number: 从 0 开始
+   返回 NULL 表示失败 */
+MUPDF_API MuPdfAnnotationPage* mupdf_page_get_annots(MuPdfContext* ctx, MuPdfDocument* doc,
+                                                       int page_number);
+
+/* 释放注释列表 */
+MUPDF_API void mupdf_annot_page_free(MuPdfAnnotationPage* page);
+
+/* 添加注释到页面
+   type: pdf_annot_type 枚举值 (如 PDF_ANNOT_HIGHLIGHT)
+   rect: 注释矩形坐标
+   返回 0 表示成功，-1 表示失败 */
+MUPDF_API int mupdf_page_add_annot(MuPdfContext* ctx, MuPdfDocument* doc,
+                                    int page_number, int type, MuPdfRect rect);
+
+/* 按索引删除注释
+   index: 从 0 开始
+   返回 0 表示成功，-1 表示失败 */
+MUPDF_API int mupdf_page_delete_annot(MuPdfContext* ctx, MuPdfDocument* doc,
+                                       int page_number, int index);
+
+/* 获取页面链接列表
+   page_number: 从 0 开始
+   返回 NULL 表示失败 */
+MUPDF_API MuPdfLinkPage* mupdf_page_get_links(MuPdfContext* ctx, MuPdfDocument* doc,
+                                                int page_number);
+
+/* 释放链接列表 */
+MUPDF_API void mupdf_link_page_free(MuPdfLinkPage* page);
+
+/* 保存文档到文件（持久化注释/链接修改）
+   返回 0 表示成功，-1 表示失败 */
+MUPDF_API int mupdf_doc_save(MuPdfContext* ctx, MuPdfDocument* doc, const char* filepath);
 
 /* 获取最后错误信息（返回静态字符串，不要释放） */
 MUPDF_API const char* mupdf_last_error(MuPdfContext* ctx);

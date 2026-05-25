@@ -1,5 +1,7 @@
 #include "mupdf_api.h"
 #include <mupdf/fitz.h>
+#include <mupdf/pdf/document.h>
+#include <mupdf/pdf/annot.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -235,44 +237,101 @@ MUPDF_API void mupdf_outline_free(MuPdfOutlineJson* outline) {
     free(outline);
 }
 
+static MuPdfImage* render_page_common(fz_context* fz_ctx, fz_document* fz_doc,
+                                         int page_number, float zoom, float rotate, int alpha,
+                                         int skip_annot) {
+    fz_matrix ctm = fz_scale(zoom / 100.0f, zoom / 100.0f);
+    ctm = fz_pre_rotate(ctm, rotate);
+    fz_colorspace* cs = fz_device_rgb(fz_ctx);
+
+    fz_pixmap* pix = NULL;
+    fz_try(fz_ctx) {
+        if (skip_annot) {
+            fz_page* page = fz_load_page(fz_ctx, fz_doc, page_number);
+            pix = fz_new_pixmap_from_page_contents(fz_ctx, page, ctm, cs, alpha);
+            fz_drop_page(fz_ctx, page);
+        } else {
+            pix = fz_new_pixmap_from_page_number(fz_ctx, fz_doc, page_number, ctm, cs, alpha);
+        }
+    } fz_catch(fz_ctx) {
+        return NULL;
+    }
+
+    int width = fz_pixmap_width(fz_ctx, pix);
+    int height = fz_pixmap_height(fz_ctx, pix);
+    int src_stride = fz_pixmap_stride(fz_ctx, pix);
+    int components = fz_pixmap_components(fz_ctx, pix);
+    unsigned char* src_samples = fz_pixmap_samples(fz_ctx, pix);
+
+    MuPdfImage* image = (MuPdfImage*)calloc(1, sizeof(MuPdfImage));
+    if (!image) {
+        fz_drop_pixmap(fz_ctx, pix);
+        return NULL;
+    }
+
+    image->width = width;
+    image->height = height;
+
+    if (components == 3) {
+        /* RGB -> RGBA: expand 3-byte pixels to 4-byte RGBA with alpha=255 */
+        int dst_stride = width * 4;
+        size_t data_size = (size_t)dst_stride * height;
+        image->buffer = (unsigned char*)malloc(data_size);
+        if (!image->buffer) {
+            fz_drop_pixmap(fz_ctx, pix);
+            free(image);
+            return NULL;
+        }
+
+        for (int y = 0; y < height; y++) {
+            const unsigned char* src = src_samples + (size_t)y * src_stride;
+            unsigned char* dst = image->buffer + (size_t)y * dst_stride;
+            for (int x = 0; x < width; x++) {
+                *dst++ = *src++;
+                *dst++ = *src++;
+                *dst++ = *src++;
+                *dst++ = 0xFF;
+            }
+        }
+
+        image->stride = dst_stride;
+        image->components = 4;
+    } else {
+        /* RGBA: direct copy */
+        size_t data_size = (size_t)src_stride * height;
+        image->buffer = (unsigned char*)malloc(data_size);
+        if (!image->buffer) {
+            fz_drop_pixmap(fz_ctx, pix);
+            free(image);
+            return NULL;
+        }
+        memcpy(image->buffer, src_samples, data_size);
+
+        image->stride = src_stride;
+        image->components = components;
+    }
+
+    fz_drop_pixmap(fz_ctx, pix);
+    return image;
+}
+
 MUPDF_API MuPdfImage* mupdf_page_render(MuPdfContext* ctx, MuPdfDocument* doc,
                                          int page_number, float zoom, float rotate, int alpha) {
     if (!ctx || !doc) return NULL;
 
-    fz_matrix ctm = fz_scale(zoom / 100.0f, zoom / 100.0f);
-    ctm = fz_pre_rotate(ctm, rotate);
-    fz_colorspace* cs = fz_device_rgb(ctx->ctx);
-
-    fz_pixmap* pix = NULL;
-    fz_try(ctx->ctx) {
-        pix = fz_new_pixmap_from_page_number(ctx->ctx, doc->doc, page_number, ctm, cs, alpha);
-    } fz_catch(ctx->ctx) {
+    MuPdfImage* image = render_page_common(ctx->ctx, doc->doc, page_number, zoom, rotate, alpha, 0);
+    if (!image)
         snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
-        return NULL;
-    }
+    return image;
+}
 
-    MuPdfImage* image = (MuPdfImage*)calloc(1, sizeof(MuPdfImage));
-    if (!image) {
-        fz_drop_pixmap(ctx->ctx, pix);
-        return NULL;
-    }
+MUPDF_API MuPdfImage* mupdf_page_render_no_annot(MuPdfContext* ctx, MuPdfDocument* doc,
+                                                  int page_number, float zoom, float rotate, int alpha) {
+    if (!ctx || !doc) return NULL;
 
-    image->width = fz_pixmap_width(ctx->ctx, pix);
-    image->height = fz_pixmap_height(ctx->ctx, pix);
-    image->stride = fz_pixmap_stride(ctx->ctx, pix);
-    image->components = fz_pixmap_components(ctx->ctx, pix);
-
-    /* 复制像素数据到独立 buffer（因为 pixmap 销毁后 samples 无效） */
-    size_t data_size = (size_t)image->stride * image->height;
-    image->buffer = (unsigned char*)malloc(data_size);
-    if (!image->buffer) {
-        fz_drop_pixmap(ctx->ctx, pix);
-        free(image);
-        return NULL;
-    }
-    memcpy(image->buffer, fz_pixmap_samples(ctx->ctx, pix), data_size);
-
-    fz_drop_pixmap(ctx->ctx, pix);
+    MuPdfImage* image = render_page_common(ctx->ctx, doc->doc, page_number, zoom, rotate, alpha, 1);
+    if (!image)
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
     return image;
 }
 
@@ -288,10 +347,49 @@ MUPDF_API void mupdf_ctx_destroy(MuPdfContext* ctx) {
     free(ctx);
 }
 
+MUPDF_API MuPdfImages* mupdf_pages_render_no_annot(MuPdfContext* ctx, MuPdfDocument* doc,
+                                                     int start_page, int end_page,
+                                                     float zoom, float rotate, int alpha) {
+    if (!ctx || !doc) return NULL;
+    
+    int n = end_page - start_page + 1;
+    MuPdfImages* result = (MuPdfImages*)calloc(1, sizeof(MuPdfImages));
+    if (!result) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+        return NULL;
+    }
+
+    result->images_count = n;
+    result->images = (MuPdfImage**)calloc((size_t)n, sizeof(MuPdfImage*));
+    if (!result->images) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+        free(result);
+        return NULL;
+    }
+
+    for (int i = 0; i < n; i++) {
+        result->images[i] = render_page_common(ctx->ctx, doc->doc, start_page + i, zoom, rotate, alpha, 1);
+        if (!result->images[i])
+            snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+    }
+
+    return result;
+}
+
 MUPDF_API void mupdf_image_free(MuPdfImage* image) {
     if (!image) return;
     if (image->buffer) free(image->buffer);
     free(image);
+}
+
+MUPDF_API void mupdf_images_free(MuPdfImages* images) {
+    if (!images) return;
+    if (images->images) {
+        for (int i = 0; i < images->images_count; i++)
+            mupdf_image_free(images->images[i]);
+        free(images->images);
+    }
+    free(images);
 }
 
 /* === UTF-8 辅助函数 === */
@@ -505,6 +603,300 @@ MUPDF_API void mupdf_stext_page_free(MuPdfTextPage* page) {
         free(page->blocks);
     }
     free(page);
+}
+
+/* === 注释提取 === */
+
+MUPDF_API MuPdfAnnotationPage* mupdf_page_get_annots(MuPdfContext* ctx, MuPdfDocument* doc,
+                                                       int page_number) {
+    if (!ctx || !doc) return NULL;
+
+    pdf_document* pdf = NULL;
+    pdf_page* pdf_page = NULL;
+    MuPdfAnnotationPage* result = NULL;
+    int count = 0;
+
+    /* 检查文档是否为 PDF */
+    fz_try(ctx->ctx) {
+        pdf = pdf_document_from_fz_document(ctx->ctx, doc->doc);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        return NULL;
+    }
+    if (!pdf) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "not a PDF document");
+        return NULL;
+    }
+
+    /* 加载页面并枚举注释 */
+    fz_try(ctx->ctx) {
+        pdf_page = pdf_load_page(ctx->ctx, pdf, page_number);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        return NULL;
+    }
+
+    /* 第一遍：统计数量 */
+    {
+        pdf_annot* annot = NULL;
+        fz_try(ctx->ctx) {
+            for (annot = pdf_first_annot(ctx->ctx, pdf_page); annot;
+                 annot = pdf_next_annot(ctx->ctx, annot)) {
+                count++;
+            }
+        } fz_catch(ctx->ctx) {
+            snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+            if (pdf_page) fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+            return NULL;
+        }
+    }
+
+    /* 分配结果结构 */
+    result = (MuPdfAnnotationPage*)calloc(1, sizeof(MuPdfAnnotationPage));
+    if (!result) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+        fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+        return NULL;
+    }
+
+    result->annots_count = count;
+    if (count > 0) {
+        result->annots = (MuPdfAnnotation*)calloc((size_t)count, sizeof(MuPdfAnnotation));
+        if (!result->annots) {
+            snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+            mupdf_annot_page_free(result);
+            fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+            return NULL;
+        }
+
+        /* 第二遍：填充数据 */
+        {
+            int i = 0;
+            pdf_annot* annot = NULL;
+            fz_try(ctx->ctx) {
+                for (annot = pdf_first_annot(ctx->ctx, pdf_page); annot;
+                     annot = pdf_next_annot(ctx->ctx, annot)) {
+                    fz_rect r = pdf_bound_annot(ctx->ctx, annot);
+                    result->annots[i].rect.x0 = r.x0;
+                    result->annots[i].rect.y0 = r.y0;
+                    result->annots[i].rect.x1 = r.x1;
+                    result->annots[i].rect.y1 = r.y1;
+                    result->annots[i].type = (int)pdf_annot_type(ctx->ctx, annot);
+                    i++;
+                }
+            } fz_catch(ctx->ctx) {
+                snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+                mupdf_annot_page_free(result);
+                result = NULL;
+            }
+        }
+    }
+
+    fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+    return result;
+}
+
+MUPDF_API void mupdf_annot_page_free(MuPdfAnnotationPage* page) {
+    if (!page) return;
+    if (page->annots) free(page->annots);
+    free(page);
+}
+
+/* === 注释创建/删除 === */
+
+MUPDF_API int mupdf_page_add_annot(MuPdfContext* ctx, MuPdfDocument* doc,
+                                    int page_number, int type, MuPdfRect rect) {
+    if (!ctx || !doc) return -1;
+
+    pdf_document* pdf = NULL;
+    pdf_page* pdf_page = NULL;
+
+    /* 检查文档是否为 PDF */
+    fz_try(ctx->ctx) {
+        pdf = pdf_document_from_fz_document(ctx->ctx, doc->doc);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        return -1;
+    }
+    if (!pdf) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "not a PDF document");
+        return -1;
+    }
+
+    /* 加载页面 */
+    fz_try(ctx->ctx) {
+        pdf_page = pdf_load_page(ctx->ctx, pdf, page_number);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        return -1;
+    }
+
+    /* 创建注释 */
+    fz_try(ctx->ctx) {
+        pdf_annot* annot = pdf_create_annot(ctx->ctx, pdf_page, (enum pdf_annot_type)type);
+        fz_rect r = { rect.x0, rect.y0, rect.x1, rect.y1 };
+        pdf_set_annot_rect(ctx->ctx, annot, r);
+        pdf_update_page(ctx->ctx, pdf_page);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+        return -1;
+    }
+
+    fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+    return 0;
+}
+
+MUPDF_API int mupdf_page_delete_annot(MuPdfContext* ctx, MuPdfDocument* doc,
+                                       int page_number, int index) {
+    if (!ctx || !doc) return -1;
+
+    pdf_document* pdf = NULL;
+    pdf_page* pdf_page = NULL;
+
+    /* 检查文档是否为 PDF */
+    fz_try(ctx->ctx) {
+        pdf = pdf_document_from_fz_document(ctx->ctx, doc->doc);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        return -1;
+    }
+    if (!pdf) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "not a PDF document");
+        return -1;
+    }
+
+    /* 加载页面 */
+    fz_try(ctx->ctx) {
+        pdf_page = pdf_load_page(ctx->ctx, pdf, page_number);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        return -1;
+    }
+
+    /* 按索引查找并删除 */
+    fz_try(ctx->ctx) {
+        pdf_annot* annot = NULL;
+        int i = 0;
+        for (annot = pdf_first_annot(ctx->ctx, pdf_page); annot;
+             annot = pdf_next_annot(ctx->ctx, annot), i++) {
+            if (i == index) {
+                pdf_delete_annot(ctx->ctx, pdf_page, annot);
+                pdf_update_page(ctx->ctx, pdf_page);
+                fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+                return 0;
+            }
+        }
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+        return -1;
+    }
+
+    /* 未找到该索引 */
+    snprintf(ctx->last_error, sizeof(ctx->last_error), "annotation index %d out of range", index);
+    fz_drop_page(ctx->ctx, (fz_page*)pdf_page);
+    return -1;
+}
+
+/* === 链接提取 === */
+
+MUPDF_API MuPdfLinkPage* mupdf_page_get_links(MuPdfContext* ctx, MuPdfDocument* doc,
+                                                int page_number) {
+    if (!ctx || !doc) return NULL;
+
+    fz_page* page = NULL;
+    fz_link* links = NULL;
+    MuPdfLinkPage* result = NULL;
+    int count = 0;
+
+    /* 加载页面和链接 */
+    fz_try(ctx->ctx) {
+        page = fz_load_page(ctx->ctx, doc->doc, page_number);
+        links = fz_load_links(ctx->ctx, page);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        if (page) fz_drop_page(ctx->ctx, page);
+        return NULL;
+    }
+
+    /* 第一遍：统计数量 */
+    for (fz_link* link = links; link; link = link->next) {
+        count++;
+    }
+
+    /* 分配结果结构 */
+    result = (MuPdfLinkPage*)calloc(1, sizeof(MuPdfLinkPage));
+    if (!result) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+        if (links) fz_drop_link(ctx->ctx, links);
+        fz_drop_page(ctx->ctx, page);
+        return NULL;
+    }
+
+    result->links_count = count;
+    if (count > 0) {
+        result->links = (MuPdfLink*)calloc((size_t)count, sizeof(MuPdfLink));
+        if (!result->links) {
+            snprintf(ctx->last_error, sizeof(ctx->last_error), "out of memory");
+            mupdf_link_page_free(result);
+            result = NULL;
+        } else {
+            /* 第二遍：填充数据 */
+            int i = 0;
+            for (fz_link* link = links; link; link = link->next, i++) {
+                result->links[i].rect.x0 = link->rect.x0;
+                result->links[i].rect.y0 = link->rect.y0;
+                result->links[i].rect.x1 = link->rect.x1;
+                result->links[i].rect.y1 = link->rect.y1;
+                result->links[i].uri = link->uri ? _strdup(link->uri) : NULL;
+            }
+        }
+    }
+
+    if (links) fz_drop_link(ctx->ctx, links);
+    fz_drop_page(ctx->ctx, page);
+    return result;
+}
+
+MUPDF_API void mupdf_link_page_free(MuPdfLinkPage* page) {
+    if (!page) return;
+    if (page->links) {
+        for (int i = 0; i < page->links_count; i++) {
+            if (page->links[i].uri) free(page->links[i].uri);
+        }
+        free(page->links);
+    }
+    free(page);
+}
+
+/* === 文档保存 === */
+
+MUPDF_API int mupdf_doc_save(MuPdfContext* ctx, MuPdfDocument* doc, const char* filepath) {
+    if (!ctx || !doc || !filepath) return -1;
+
+    pdf_document* pdf = NULL;
+
+    /* 检查文档是否为 PDF */
+    fz_try(ctx->ctx) {
+        pdf = pdf_document_from_fz_document(ctx->ctx, doc->doc);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        return -1;
+    }
+    if (!pdf) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "not a PDF document");
+        return -1;
+    }
+
+    fz_try(ctx->ctx) {
+        pdf_save_document(ctx->ctx, pdf, filepath, &pdf_default_write_options);
+    } fz_catch(ctx->ctx) {
+        snprintf(ctx->last_error, sizeof(ctx->last_error), "%s", fz_caught_message(ctx->ctx));
+        return -1;
+    }
+
+    return 0;
 }
 
 MUPDF_API const char* mupdf_last_error(MuPdfContext* ctx) {
